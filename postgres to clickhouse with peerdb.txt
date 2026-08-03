@@ -1,0 +1,2225 @@
+sudo apt update
+
+sudo apt upgrade -y
+
+---Install Basic Utilities
+sudo apt install -y \
+vim \
+curl \
+wget \
+git \
+htop \
+tree \
+unzip \
+zip \
+net-tools \
+jq
+
+--- Set the Timezone
+
+timedatectl
+
+sudo timedatectl set-timezone Asia/Kolkata
+
+timedatectl
+
+---Set a Meaningful Hostname
+
+sudo hostnamectl set-hostname postgres-server
+
+hostname
+
+sudo reboot
+
+--- Install PostgreSQL from the Ubuntu repository:
+
+sudo apt install PostgreSQL
+
+psql --version
+
+sudo systemctl status PostgreSQL
+
+sudo pg_lsclusters
+
+-- Connect as the postgres user
+sudo -i -u postgres
+
+Then start PostgreSQL:
+psql
+
+SELECT version();
+
+\q
+
+SELECT current_user;
+
+exit
+
+sudo -u postgres psql
+
+---Configure PostgreSQL for Production & CDC
+
+sudo -u postgres psql -c "SHOW config_file;"
+
+sudo -u postgres psql -c "SHOW hba_file;"
+
+sudo -u postgres psql -c "SHOW data_directory;"
+
+
+sudo nano /etc/postgresql/18/main/postgresql.conf
+
+Ctrl + W
+
+listen_addresses = '*'
+
+wal_level = replica change to wal_level = logical
+
+max_replication_slots = 10
+
+max_wal_senders = 10
+
+wal_keep_size = 1GB
+
+shared_buffers = 1GB
+
+effective_cache_size = 3GB
+
+work_mem = 8MB
+
+maintenance_work_mem = 256MB
+
+max_connections = 200
+
+logging_collector = on
+
+log_directory = 'log'
+
+log_filename = 'postgresql-%Y-%m-%d.log'
+
+---Restart PostgreSQL
+
+sudo systemctl restart PostgreSQL
+
+sudo systemctl status postgresql
+
+---Verify the configuration was applied
+
+sudo -u postgres psql
+
+SHOW wal_level;
+SHOW listen_addresses;
+SHOW max_replication_slots;
+SHOW max_wal_senders;
+SHOW shared_buffers;
+SHOW effective_cache_size;
+SHOW work_mem;
+SHOW maintenance_work_mem;
+SHOW logging_collector;
+
+\q
+
+
+---Configure Client Authentication (pg_hba.conf)
+
+What is pg_hba.conf?
+
+pg_hba.conf stands for Host-Based Authentication.
+
+Think of it as PostgreSQL's firewall.
+
+Even if PostgreSQL is listening on all interfaces (listen_addresses = '*'), no one can connect unless pg_hba.conf allows it.
+
+sudo nano /etc/postgresql/18/main/pg_hba.conf
+
+-- Add These Lines at the Bottom
+
+# =====================================================
+# CDC Project - PeerDB / Debezium
+# =====================================================
+
+# Application user
+host    all             app_user        0.0.0.0/0               scram-sha-256
+
+# Replication user
+host    replication     replicator      0.0.0.0/0               scram-sha-256
+
+
+
+sudo systemctl reload PostgreSQL
+
+sudo systemctl status PostgreSQL
+
+
+--- Create Database Roles
+
+sudo -u postgres psql
+
+\du
+
+-- Create the Application User
+
+CREATE ROLE app_user
+LOGIN
+PASSWORD 'AppUser@123';
+
+-- Create the Replication User
+
+CREATE ROLE replicator
+WITH
+LOGIN
+REPLICATION
+PASSWORD 'Replicator@123';
+
+-- Create the Project Database
+
+CREATE DATABASE cdc_demo
+OWNER app_user;
+
+-- Connect to the New Database
+
+\c cdc_demo
+
+SELECT current_database();
+
+-- Create Customers Table
+CREATE TABLE customers
+(
+    customer_id      BIGSERIAL PRIMARY KEY,
+    first_name       VARCHAR(50) NOT NULL,
+    last_name        VARCHAR(50) NOT NULL,
+    email            VARCHAR(150) UNIQUE NOT NULL,
+    phone            VARCHAR(20),
+    city             VARCHAR(100),
+    state            VARCHAR(100),
+    country          VARCHAR(100),
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Categories
+
+CREATE TABLE categories
+(
+    category_id      BIGSERIAL PRIMARY KEY,
+    category_name    VARCHAR(100) UNIQUE NOT NULL
+);
+
+-- Suppliers
+
+CREATE TABLE suppliers
+(
+    supplier_id      BIGSERIAL PRIMARY KEY,
+    supplier_name    VARCHAR(150),
+    city             VARCHAR(100),
+    country          VARCHAR(100)
+);
+
+-- Products
+
+CREATE TABLE products
+(
+    product_id       BIGSERIAL PRIMARY KEY,
+    category_id      BIGINT REFERENCES categories(category_id),
+    supplier_id      BIGINT REFERENCES suppliers(supplier_id),
+
+    product_name     VARCHAR(200),
+    brand            VARCHAR(100),
+
+    price            NUMERIC(10,2),
+
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Inventory
+
+CREATE TABLE inventory
+(
+    inventory_id     BIGSERIAL PRIMARY KEY,
+
+    product_id       BIGINT REFERENCES products(product_id),
+
+    quantity         INT,
+
+    warehouse        VARCHAR(100),
+
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Orders
+
+CREATE TABLE orders
+(
+    order_id         BIGSERIAL PRIMARY KEY,
+
+    customer_id      BIGINT REFERENCES customers(customer_id),
+
+    order_date       TIMESTAMP,
+
+    status           VARCHAR(30),
+
+    total_amount     NUMERIC(12,2)
+);
+
+
+-- Order Items
+CREATE TABLE order_items
+(
+    order_item_id    BIGSERIAL PRIMARY KEY,
+
+    order_id         BIGINT REFERENCES orders(order_id),
+
+    product_id       BIGINT REFERENCES products(product_id),
+
+    quantity         INT,
+
+    unit_price       NUMERIC(10,2)
+);
+
+
+-- Payments
+
+CREATE TABLE payments
+(
+    payment_id       BIGSERIAL PRIMARY KEY,
+
+    order_id         BIGINT REFERENCES orders(order_id),
+
+    payment_method   VARCHAR(30),
+
+    payment_status   VARCHAR(30),
+
+    payment_date     TIMESTAMP,
+
+    amount           NUMERIC(12,2)
+);
+
+-- Shipments
+
+CREATE TABLE shipments
+(
+    shipment_id      BIGSERIAL PRIMARY KEY,
+
+    order_id         BIGINT REFERENCES orders(order_id),
+
+    shipment_status  VARCHAR(30),
+
+    courier          VARCHAR(100),
+
+    tracking_number  VARCHAR(100),
+
+    shipped_date     TIMESTAMP,
+
+    delivered_date   TIMESTAMP
+);
+
+-- Returns
+
+CREATE TABLE returns
+(
+    return_id        BIGSERIAL PRIMARY KEY,
+
+    order_id         BIGINT REFERENCES orders(order_id),
+
+    return_reason    VARCHAR(200),
+
+    refund_amount    NUMERIC(12,2),
+
+    return_date      TIMESTAMP
+);
+
+-- verify 
+
+\dt
+
+
+--- Create a Data Generator
+
+mkdir ~/cdc-data-generator
+cd ~/cdc-data-generator
+
+python3 --version
+
+sudo apt update
+sudo apt install python3.14-venv -y
+
+python3 -m venv venv
+
+source venv/bin/activate
+
+python -m pip install --upgrade pip
+
+pip install faker psycopg2-binary tqdm python-dotenv
+
+pip freeze > requirements.txt
+
+-- Create the Structure
+
+mkdir generators utils logs
+
+touch .env
+touch .gitignore
+touch README.md
+touch config.py
+touch db.py
+touch main.py
+
+touch generators/__init__.py
+touch generators/customers.py
+touch generators/categories.py
+touch generators/suppliers.py
+touch generators/products.py
+touch generators/inventory.py
+touch generators/orders.py
+touch generators/order_items.py
+touch generators/payments.py
+touch generators/shipments.py
+touch generators/returns.py
+
+touch utils/__init__.py
+touch utils/constants.py
+touch utils/helpers.py
+
+-Then install tree if you don't already have it:
+
+sudo apt install tree -y
+
+tree
+
+-- Create the .env File
+nano .env
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=cdc_demo
+DB_USER=app_user
+DB_PASSWORD=AppUser@123
+
+-- Create config.py
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "port": int(os.getenv("DB_PORT")),
+    "dbname": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+}
+
+-- create db.py
+import psycopg2
+from config import DB_CONFIG
+
+
+def get_connection():
+    return psycopg2.connect(**DB_CONFIG)
+
+--Test the Database Connection main.py
+
+from db import get_connection
+
+try:
+    conn = get_connection()
+    print("✅ Connected to PostgreSQL successfully!")
+
+    cur = conn.cursor()
+    cur.execute("SELECT version();")
+    print(cur.fetchone()[0])
+
+    cur.close()
+    conn.close()
+
+except Exception as e:
+    print("❌ Connection failed:")
+    print(e)
+
+python main.py
+
+
+nano utils/constants.py
+
+paste -
+
+# Historical Load Configuration
+
+CUSTOMER_COUNT = 10_000
+CATEGORY_COUNT = 100
+SUPPLIER_COUNT = 500
+PRODUCT_COUNT = 5_000
+ORDER_COUNT = 100_000
+ORDER_ITEM_COUNT = 300_000
+PAYMENT_COUNT = 100_000
+SHIPMENT_COUNT = 100_000
+RETURN_COUNT = 10_000
+
+# Batch Size
+
+BATCH_SIZE = 1000
+
+nano utils/helpers.py
+
+paste -
+from datetime import datetime
+
+def log(message):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+
+nano generators/categories.py
+
+
+PASTE -
+
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import BATCH_SIZE
+from utils.helpers import log
+
+
+CATEGORIES = [
+    "Electronics",
+    "Mobile Phones",
+    "Laptops",
+    "Tablets",
+    "Accessories",
+    "Fashion",
+    "Men Clothing",
+    "Women Clothing",
+    "Kids Clothing",
+    "Footwear",
+    "Sports",
+    "Fitness",
+    "Books",
+    "Stationery",
+    "Home & Kitchen",
+    "Furniture",
+    "Appliances",
+    "Beauty",
+    "Health",
+    "Groceries",
+    "Pet Supplies",
+    "Automotive",
+    "Toys",
+    "Gaming",
+    "Jewellery",
+    "Watches",
+    "Bags",
+    "Travel",
+    "Musical Instruments",
+    "Office Supplies",
+    "Garden",
+    "Baby Products",
+    "Medical",
+    "Industrial",
+    "Software",
+    "Smart Home",
+    "Camera",
+    "Television",
+    "Audio",
+    "Kitchen Appliances",
+    "Lighting",
+    "Tools",
+    "Cleaning",
+    "Decor",
+    "Mattresses",
+    "Storage",
+    "Cycling",
+    "Outdoor",
+    "Camping",
+    "Food",
+    "Beverages",
+    "Organic Food",
+    "Frozen Food",
+    "Dairy",
+    "Bakery",
+    "Seafood",
+    "Snacks",
+    "Coffee",
+    "Tea",
+    "Energy Drinks",
+    "Fitness Equipment",
+    "Yoga",
+    "Cricket",
+    "Football",
+    "Badminton",
+    "Swimming",
+    "Running",
+    "Motorcycle Gear",
+    "Car Accessories",
+    "Printers",
+    "Networking",
+    "Computer Components",
+    "Monitors",
+    "Storage Devices",
+    "Power Banks",
+    "Chargers",
+    "Headphones",
+    "Speakers",
+    "Smart Watches",
+    "VR Devices",
+    "Educational Toys",
+    "Art Supplies",
+    "Craft Supplies",
+    "Gift Items",
+    "Party Supplies",
+    "Religious Items",
+    "Seasonal Products",
+    "Safety Equipment",
+    "Construction",
+    "Electrical",
+    "Plumbing",
+    "Agriculture",
+    "Hand Tools",
+    "Power Tools",
+    "Lab Equipment",
+    "Packaging",
+    "Fashion Accessories",
+    "Luxury Goods",
+    "Collectibles",
+    "Digital Products",
+    "Subscriptions"
+]
+
+
+def generate_categories():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating categories...")
+
+    rows = [(category,) for category in CATEGORIES]
+
+    query = """
+        INSERT INTO categories (category_name)
+        VALUES %s
+        ON CONFLICT (category_name) DO NOTHING;
+    """
+
+    execute_values(cursor, query, rows, page_size=BATCH_SIZE)
+
+    conn.commit()
+
+    log(f"Inserted {len(rows)} categories.")
+
+    cursor.close()
+    conn.close()
+
+-- Update main.py
+
+from generators.categories import generate_categories
+
+if __name__ == "__main__":
+    generate_categories()
+
+python main.py
+
+
+--- Check the table owner
+
+sudo -u postgres psql -d cdc_demo
+
+\dt+
+
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO app_user;
+
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO app_user;
+
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON TABLES TO app_user;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON SEQUENCES TO app_user;
+
+\q
+
+-- Run the generator again
+python main.py
+
+
+--Update utils/constants.py
+
+"""
+Application constants
+"""
+
+# ==========================
+# Historical Load Configuration
+# ==========================
+
+CUSTOMER_COUNT = 10_000
+CATEGORY_COUNT = 101
+SUPPLIER_COUNT = 500
+PRODUCT_COUNT = 5_000
+ORDER_COUNT = 100_000
+ORDER_ITEM_COUNT = 300_000
+PAYMENT_COUNT = 100_000
+SHIPMENT_COUNT = 100_000
+RETURN_COUNT = 10_000
+
+# ==========================
+# Batch Configuration
+# ==========================
+
+BATCH_SIZE = 1000
+
+# ==========================
+# Categories
+# ==========================
+
+CATEGORIES = [
+    "Electronics",
+    "Mobile Phones",
+    "Laptops",
+    "Tablets",
+    "Accessories",
+    "Fashion",
+    "Men Clothing",
+    "Women Clothing",
+    "Kids Clothing",
+    "Footwear",
+    "Sports",
+    "Fitness",
+    "Books",
+    "Stationery",
+    "Home & Kitchen",
+    "Furniture",
+    "Appliances",
+    "Beauty",
+    "Health",
+    "Groceries",
+    "Pet Supplies",
+    "Automotive",
+    "Toys",
+    "Gaming",
+    "Jewellery",
+    "Watches",
+    "Bags",
+    "Travel",
+    "Musical Instruments",
+    "Office Supplies",
+    "Garden",
+    "Baby Products",
+    "Medical",
+    "Industrial",
+    "Software",
+    "Smart Home",
+    "Camera",
+    "Television",
+    "Audio",
+    "Kitchen Appliances",
+    "Lighting",
+    "Tools",
+    "Cleaning",
+    "Decor",
+    "Mattresses",
+    "Storage",
+    "Cycling",
+    "Outdoor",
+    "Camping",
+    "Food",
+    "Beverages",
+    "Organic Food",
+    "Frozen Food",
+    "Dairy",
+    "Bakery",
+    "Seafood",
+    "Snacks",
+    "Coffee",
+    "Tea",
+    "Energy Drinks",
+    "Fitness Equipment",
+    "Yoga",
+    "Cricket",
+    "Football",
+    "Badminton",
+    "Swimming",
+    "Running",
+    "Motorcycle Gear",
+    "Car Accessories",
+    "Printers",
+    "Networking",
+    "Computer Components",
+    "Monitors",
+    "Storage Devices",
+    "Power Banks",
+    "Chargers",
+    "Headphones",
+    "Speakers",
+    "Smart Watches",
+    "VR Devices",
+    "Educational Toys",
+    "Art Supplies",
+    "Craft Supplies",
+    "Gift Items",
+    "Party Supplies",
+    "Religious Items",
+    "Seasonal Products",
+    "Safety Equipment",
+    "Construction",
+    "Electrical",
+    "Plumbing",
+    "Agriculture",
+    "Hand Tools",
+    "Power Tools",
+    "Lab Equipment",
+    "Packaging",
+    "Fashion Accessories",
+    "Luxury Goods",
+    "Collectibles",
+    "Digital Products",
+    "Subscriptions"
+]
+
+# ==========================
+# Payment Methods
+# ==========================
+
+PAYMENT_METHODS = [
+    "UPI",
+    "Credit Card",
+    "Debit Card",
+    "Net Banking",
+    "Cash on Delivery"
+]
+
+# ==========================
+# Order Status
+# ==========================
+
+ORDER_STATUS = [
+    "Pending",
+    "Paid",
+    "Packed",
+    "Shipped",
+    "Delivered",
+    "Cancelled"
+]
+
+# ==========================
+# Shipment Status
+# ==========================
+
+SHIPMENT_STATUS = [
+    "Ready",
+    "Packed",
+    "In Transit",
+    "Delivered",
+    "Returned"
+]
+
+# ==========================
+# Courier Companies
+# ==========================
+
+COURIERS = [
+    "Blue Dart",
+    "DTDC",
+    "Delhivery",
+    "Ekart",
+    "XpressBees",
+    "India Post",
+    "Amazon Logistics"
+]
+
+# ==========================
+# Warehouse Names
+# ==========================
+
+WAREHOUSES = [
+    "Mumbai Warehouse",
+    "Pune Warehouse",
+    "Delhi Warehouse",
+    "Bengaluru Warehouse",
+    "Hyderabad Warehouse"
+]
+
+
+
+
+-- Update utils/helpers.py
+
+from datetime import datetime
+
+
+def log(message):
+    """
+    Print log message with timestamp.
+    """
+
+    current_time = datetime.now().strftime("%H:%M:%S")
+
+    print(f"[{current_time}] {message}")
+
+-- Update generators/categories.py
+
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    CATEGORIES,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+
+def generate_categories():
+    """
+    Insert product categories.
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating categories...")
+
+    rows = [(category,) for category in CATEGORIES]
+
+    query = """
+        INSERT INTO categories (category_name)
+        VALUES %s
+        ON CONFLICT (category_name)
+        DO NOTHING;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM categories;")
+    total = cursor.fetchone()[0]
+
+    log(f"Categories available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+-- Update main.py
+
+from generators.categories import generate_categories
+
+
+def main():
+
+    generate_categories()
+
+
+if __name__ == "__main__":
+    main()
+
+python main.py
+
+
+--- Replace generators/suppliers.py with this:
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import SUPPLIER_COUNT, BATCH_SIZE
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_suppliers():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating suppliers...")
+
+    rows = []
+
+    for _ in range(SUPPLIER_COUNT):
+        rows.append(
+            (
+                fake.company(),
+                fake.city(),
+                "India"
+            )
+        )
+
+    query = """
+        INSERT INTO suppliers
+        (
+            supplier_name,
+            city,
+            country
+        )
+        VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM suppliers")
+    total = cursor.fetchone()[0]
+
+    log(f"Suppliers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+-- Update main.py
+from generators.categories import generate_categories
+from generators.suppliers import generate_suppliers
+
+
+def main():
+
+    generate_categories()
+    generate_suppliers()
+
+
+if __name__ == "__main__":
+    main()
+
+python main.py
+
+--- Verify
+sudo -u postgres psql -d cdc_demo
+
+SELECT COUNT(*) FROM suppliers;
+
+SELECT * FROM suppliers LIMIT 10;
+
+--- Update generators/customers.py
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import CUSTOMER_COUNT, BATCH_SIZE
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_customers():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating customers...")
+
+    rows = []
+
+    for _ in range(CUSTOMER_COUNT):
+
+        rows.append(
+            (
+                fake.first_name(),
+                fake.last_name(),
+                fake.unique.email(),
+                fake.phone_number()[:20],
+                fake.city(),
+                fake.state(),
+                "India"
+            )
+        )
+
+    query = """
+    INSERT INTO customers
+    (
+        first_name,
+        last_name,
+        email,
+        phone,
+        city,
+        state,
+        country
+    )
+    VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM customers")
+
+    total = cursor.fetchone()[0]
+
+    log(f"Customers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+-- update main.py
+from generators.categories import generate_categories
+from generators.suppliers import generate_suppliers
+from generators.customers import generate_customers
+
+
+def main():
+    print("=" * 60)
+    print("Starting Historical Data Generation")
+    print("=" * 60)
+
+    generate_categories()
+    generate_suppliers()
+    generate_customers()
+
+    print("=" * 60)
+    print("Historical Data Generation Completed")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+
+
+--- Update utils/constants.py
+
+Add this at the bottom of the file:
+
+# ==========================
+# Brands
+# ==========================
+
+BRANDS = [
+    "Samsung",
+    "Apple",
+    "Dell",
+    "HP",
+    "Lenovo",
+    "Sony",
+    "LG",
+    "Boat",
+    "JBL",
+    "Nike",
+    "Adidas",
+    "Puma",
+    "Raymond",
+    "Levis",
+    "Zara",
+    "Philips",
+    "Bosch",
+    "Prestige",
+    "Tata",
+    "Amul"
+]
+
+
+-- generators/products.py
+
+from random import choice, randint, uniform
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    PRODUCT_COUNT,
+    CATEGORY_COUNT,
+    SUPPLIER_COUNT,
+    BRANDS,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_products():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating products...")
+
+    rows = []
+
+    for _ in range(PRODUCT_COUNT):
+
+        rows.append(
+            (
+                randint(1, CATEGORY_COUNT),
+                randint(1, SUPPLIER_COUNT),
+                fake.word().title() + " " + fake.word().title(),
+                choice(BRANDS),
+                round(uniform(100, 100000), 2)
+            )
+        )
+
+    query = """
+    INSERT INTO products
+    (
+        category_id,
+        supplier_id,
+        product_name,
+        brand,
+        price
+    )
+    VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM products")
+
+    total = cursor.fetchone()[0]
+
+    log(f"Products available : {total}")
+
+    cursor.close()
+    conn.close()
+
+--- Update main.py
+
+from generators.categories import generate_categories
+from generators.suppliers import generate_suppliers
+from generators.customers import generate_customers
+from generators.products import generate_products
+
+
+def main():
+
+    print("=" * 60)
+    print("Historical Data Generation Started")
+    print("=" * 60)
+
+    generate_categories()
+    generate_suppliers()
+    generate_customers()
+    generate_products()
+
+    print("=" * 60)
+    print("Historical Data Generation Completed")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+
+--- generators/categories.py
+
+update -- 
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    CATEGORIES,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+
+def generate_categories():
+    """
+    Insert product categories.
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating categories...")
+
+    rows = [(category,) for category in CATEGORIES]
+
+    query = """
+        INSERT INTO categories (category_name)
+        VALUES %s
+        ON CONFLICT (category_name)
+        DO NOTHING;
+        """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM categories;")
+    total = cursor.fetchone()[0]
+
+    log(f"Categories available : {total}")
+
+    cursor.close()
+    conn.close()
+
+-- generators/suppliers.py
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import SUPPLIER_COUNT, BATCH_SIZE
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_suppliers():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating suppliers...")
+
+    rows = []
+
+    for _ in range(SUPPLIER_COUNT):
+        rows.append(
+            (
+                fake.company(),
+                fake.city(),
+                "India"
+            )
+        )
+
+    query = """
+        INSERT INTO suppliers
+        (
+            supplier_name,
+            city
+        )
+        VALUES %s
+        ON CONFLICT (supplier_name)
+        DO NOTHING;
+        """
+
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM suppliers")
+    total = cursor.fetchone()[0]
+
+    log(f"Suppliers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+-- generators/customers.py
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import CUSTOMER_COUNT, BATCH_SIZE
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_customers():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating customers...")
+
+    rows = []
+
+    for _ in range(CUSTOMER_COUNT):
+
+        rows.append(
+            (
+                fake.first_name(),
+                fake.last_name(),
+                fake.unique.email(),
+                fake.phone_number()[:20],
+                fake.city(),
+                fake.state(),
+                "India"
+            )
+        )
+
+    query = """
+        INSERT INTO customers
+        (
+            first_name,
+            last_name,
+            email,
+            phone,
+            city,
+            state
+        )
+        VALUES %s
+        ON CONFLICT (email)
+        DO NOTHING;
+        """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM customers")
+
+    total = cursor.fetchone()[0]
+
+    log(f"Customers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+---generators/products.py
+from random import choice, randint, uniform
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    PRODUCT_COUNT,
+    CATEGORY_COUNT,
+    SUPPLIER_COUNT,
+    BRANDS,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_products():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating products...")
+
+    rows = []
+
+    for _ in range(PRODUCT_COUNT):
+
+        rows.append(
+            (
+                randint(1, CATEGORY_COUNT),
+                randint(1, SUPPLIER_COUNT),
+                fake.word().title() + " " + fake.word().title(),
+                choice(BRANDS),
+                round(uniform(100, 100000), 2)
+            )
+        )
+
+    query = """
+        INSERT INTO products
+        (
+            category_id,
+            supplier_id,
+            product_name,
+            brand,
+            price
+        )
+        VALUES %s;
+        """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM products")
+
+    total = cursor.fetchone()[0]
+
+    log(f"Products available : {total}")
+
+    cursor.close()
+    conn.close()
+
+-- nano reset.sql
+
+TRUNCATE TABLE
+returns,
+shipments,
+payments,
+order_items,
+orders,
+inventory,
+products,
+customers,
+suppliers,
+categories
+RESTART IDENTITY CASCADE;
+
+psql -h localhost -U app_user -d cdc_demo
+
+AppUser@123
+
+-- replace generators/suppliers.py
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    SUPPLIER_COUNT,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_suppliers():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating suppliers...")
+
+    rows = []
+
+    for _ in range(SUPPLIER_COUNT):
+        rows.append(
+            (
+                fake.company(),
+                fake.city(),
+                "India"
+            )
+        )
+
+    query = """
+    INSERT INTO suppliers
+    (
+        supplier_name,
+        city,
+        country
+    )
+    VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM suppliers")
+    total = cursor.fetchone()[0]
+
+    log(f"Suppliers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+psql -h localhost -U app_user -d cdc_demo
+
+AppUser@123
+
+
+--- Replace your entire generators/customers.py with this:
+
+from faker import Faker
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    CUSTOMER_COUNT,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+fake = Faker("en_IN")
+
+
+def generate_customers():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating customers...")
+
+    rows = []
+
+    for _ in range(CUSTOMER_COUNT):
+        rows.append(
+            (
+                fake.first_name(),
+                fake.last_name(),
+                fake.unique.email(),
+                fake.phone_number(),
+                fake.city(),
+                fake.state(),
+                "India"
+            )
+        )
+
+    query = """
+    INSERT INTO customers
+    (
+        first_name,
+        last_name,
+        email,
+        phone,
+        city,
+        state,
+        country
+    )
+    VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM customers")
+    total = cursor.fetchone()[0]
+
+    log(f"Customers available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+psql -h localhost -U app_user -d cdc_demo
+
+AppUser@123
+
+
+TRUNCATE TABLE
+returns,
+shipments,
+payments,
+order_items,
+orders,
+inventory,
+products,
+customers,
+suppliers,
+categories
+CASCADE;
+
+\q
+
+ whoami
+
+sudo -u postgres psql
+
+ALTER TABLE categories OWNER TO app_user;
+ALTER TABLE suppliers OWNER TO app_user;
+ALTER TABLE customers OWNER TO app_user;
+ALTER TABLE products OWNER TO app_user;
+ALTER TABLE inventory OWNER TO app_user;
+ALTER TABLE orders OWNER TO app_user;
+ALTER TABLE order_items OWNER TO app_user;
+ALTER TABLE payments OWNER TO app_user;
+ALTER TABLE shipments OWNER TO app_user;
+ALTER TABLE returns OWNER TO app_user;
+
+
+ALTER SEQUENCE categories_category_id_seq OWNER TO app_user;
+ALTER SEQUENCE suppliers_supplier_id_seq OWNER TO app_user;
+ALTER SEQUENCE customers_customer_id_seq OWNER TO app_user;
+ALTER SEQUENCE products_product_id_seq OWNER TO app_user;
+ALTER SEQUENCE inventory_inventory_id_seq OWNER TO app_user;
+ALTER SEQUENCE orders_order_id_seq OWNER TO app_user;
+ALTER SEQUENCE order_items_order_item_id_seq OWNER TO app_user;
+ALTER SEQUENCE payments_payment_id_seq OWNER TO app_user;
+ALTER SEQUENCE shipments_shipment_id_seq OWNER TO app_user;
+ALTER SEQUENCE returns_return_id_seq OWNER TO app_user;
+
+
+\q
+
+psql -h localhost -U app_user -d cdc_demo
+
+AppUser@123
+
+TRUNCATE TABLE
+returns,
+shipments,
+payments,
+order_items,
+orders,
+inventory,
+products,
+customers,
+suppliers,
+categories
+RESTART IDENTITY CASCADE;
+
+python main.py
+
+psql -h localhost -U app_user -d cdc_demo -c "\d inventory"
+
+AppUser@123
+
+-- generators/inventory.py
+from random import randint, choice
+
+from psycopg2.extras import execute_values
+
+from db import get_connection
+from utils.constants import (
+    PRODUCT_COUNT,
+    BATCH_SIZE
+)
+from utils.helpers import log
+
+WAREHOUSES = [
+    "Mumbai Warehouse",
+    "Pune Warehouse",
+    "Bengaluru Warehouse",
+    "Delhi Warehouse",
+    "Hyderabad Warehouse"
+]
+
+
+def generate_inventory():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log("Generating inventory...")
+
+    rows = []
+
+    for product_id in range(1, PRODUCT_COUNT + 1):
+        rows.append(
+            (
+                product_id,
+                randint(10, 500),
+                choice(WAREHOUSES)
+            )
+        )
+
+    query = """
+    INSERT INTO inventory
+    (
+        product_id,
+        quantity,
+        warehouse
+    )
+    VALUES %s;
+    """
+
+    execute_values(
+        cursor,
+        query,
+        rows,
+        page_size=BATCH_SIZE
+    )
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM inventory")
+    total = cursor.fetchone()[0]
+
+    log(f"Inventory available : {total}")
+
+    cursor.close()
+    conn.close()
+
+
+-- update main.py
+
+from generators.categories import generate_categories
+from generators.suppliers import generate_suppliers
+from generators.customers import generate_customers
+from generators.products import generate_products
+from generators.inventory import generate_inventory
+
+
+def main():
+
+    print("=" * 60)
+    print("Historical Data Generation Started")
+    print("=" * 60)
+
+    generate_categories()
+    generate_suppliers()
+    generate_customers()
+    generate_products()
+    generate_inventory()
+
+    print("=" * 60)
+    print("Historical Data Generation Completed")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+
+
+psql -h localhost -U app_user -d cdc_demo
+
+AppUser@123
+
+TRUNCATE TABLE
+returns,
+shipments,
+payments,
+order_items,
+orders,
+inventory,
+products,
+customers,
+suppliers,
+categories
+RESTART IDENTITY CASCADE;
+
+\q
+
+python main.py
+
+psql -h localhost -U app_user -d cdc_demo -c "\d orders"
+
+--update main.py
+
+from generators.categories import generate_categories
+from generators.suppliers import generate_suppliers
+from generators.customers import generate_customers
+from generators.products import generate_products
+from generators.inventory import generate_inventory
+from generators.orders import generate_orders
+from generators.order_items import generate_order_items
+from generators.payments import generate_payments
+from generators.shipments import generate_shipments
+from generators.returns import generate_returns
+
+
+def main():
+
+    print("=" * 60)
+    print("Historical Data Generation Started")
+    print("=" * 60)
+
+    generate_categories()
+    generate_suppliers()
+    generate_customers()
+    generate_products()
+    generate_inventory()
+
+    generate_orders()
+    generate_order_items()
+    generate_payments()
+    generate_shipments()
+    generate_returns()
+
+    print("=" * 60)
+    print("Historical Data Generation Completed")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+
+--- generators/orders.py
+
+---------------------------------------------------------------
+
+Install clickhouse on ubuntu
+
+visit - https://clickhouse.com/docs/get-started/setup/self-managed/debian-ubuntu
+
+------------------------------------------------------------
+
+clickhouse-client
+
+CREATE DATABASE IF NOT EXISTS cdc_demo;
+
+SHOW DATABASES;
+
+USE cdc_demo;
+
+CREATE TABLE cdc_demo.categories
+(
+    category_id UInt32,
+    category_name LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY category_id;
+
+DESCRIBE TABLE cdc_demo.categories;
+
+-------------
+
+CREATE TABLE cdc_demo.suppliers
+(
+    supplier_id UInt32,
+    supplier_name String,
+    city LowCardinality(String),
+    country LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY supplier_id;
+
+----------
+
+CREATE TABLE cdc_demo.customers
+(
+    customer_id UInt32,
+    first_name String,
+    last_name String,
+    email String,
+    phone String,
+    city LowCardinality(String),
+    state LowCardinality(String),
+    country LowCardinality(String),
+    created_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY customer_id;
+
+------
+
+CREATE TABLE cdc_demo.products
+(
+    product_id UInt32,
+    category_id UInt32,
+    supplier_id UInt32,
+    product_name String,
+    brand LowCardinality(String),
+    price Decimal(12,2),
+    created_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY product_id;
+
+------
+
+
+CREATE TABLE cdc_demo.inventory
+(
+    inventory_id UInt32,
+    product_id UInt32,
+    quantity UInt32,
+    warehouse LowCardinality(String),
+    updated_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY inventory_id;
+
+-------------
+
+
+CREATE TABLE cdc_demo.orders
+(
+    order_id UInt32,
+    customer_id UInt32,
+    order_date DateTime,
+    status LowCardinality(String),
+    total_amount Decimal(12,2)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(order_date)
+ORDER BY (order_date, order_id);
+
+
+-----------------
+
+
+CREATE TABLE cdc_demo.order_items
+(
+    order_item_id UInt32,
+    order_id UInt32,
+    product_id UInt32,
+    quantity UInt32,
+    unit_price Decimal(12,2)
+)
+ENGINE = MergeTree
+ORDER BY (order_id, order_item_id);
+
+------------
+
+
+CREATE TABLE cdc_demo.payments
+(
+    payment_id UInt32,
+    order_id UInt32,
+    payment_method LowCardinality(String),
+    payment_status LowCardinality(String),
+    payment_date DateTime,
+    amount Decimal(12,2)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(payment_date)
+ORDER BY (payment_date, payment_id);
+
+-----------
+
+CREATE TABLE cdc_demo.shipments
+(
+    shipment_id UInt32,
+    order_id UInt32,
+    shipment_status LowCardinality(String),
+    courier LowCardinality(String),
+    tracking_number String,
+    shipped_date DateTime,
+    delivered_date DateTime
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(shipped_date)
+ORDER BY (shipped_date, shipment_id);
+
+-----------------
+
+
+CREATE TABLE cdc_demo.returns
+(
+    return_id UInt32,
+    order_id UInt32,
+    return_reason LowCardinality(String),
+    refund_amount Decimal(12,2),
+    return_date DateTime
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(return_date)
+ORDER BY (return_date, return_id);
+
+-------------
+
+SHOW TABLES;
+
+categories
+customers
+inventory
+order_items
+orders
+payments
+products
+returns
+shipments
+suppliers
+
+------------------
+
+
+----------------Phase 3: PeerDB-------------------
+
+-- Created new instance for peerdb
+
+sudo apt update
+
+sudo apt install -y docker.io docker-compose-v2
+
+sudo systemctl enable docker
+sudo systemctl start docker
+
+docker --version
+
+docker compose version
+
+
+-- Verify Connectivity
+
+sudo apt update
+sudo apt install -y netcat-openbsd
+
+nc -zv <POSTGRES_PRIVATE_IP> 5432
+
+nc -zv <CLICKHOUSE_PRIVATE_IP> 8123
+
+
+- For ClickHouse native protocol:
+
+nc -zv <CLICKHOUSE_PRIVATE_IP> 9000
+
+
+-- if clickhouse refused its connection then 
+
+on clickhouse ec2 instance Check what ClickHouse is listening on:
+
+sudo ss -ltn | grep -E "8123|9000"
+
+- Check current configuration:
+sudo grep -R "<listen_host>" /etc/clickhouse-server/
+
+sudo nano /etc/clickhouse-server/config.xml
+
+Find these two lines and comment out them:
+<listen_host>::1</listen_host>
+<listen_host>127.0.0.1</listen_host>
+
+Now uncomment this existing line:
+<!-- <listen_host>0.0.0.0</listen_host> -->
+
+
+sudo systemctl restart clickhouse-server
+
+sudo systemctl status clickhouse-server --no-pager
+
+---------------------------------------------------
+
+Step 1: Clone PeerDB
+
+On the PeerDB EC2:
+
+git clone https://github.com/PeerDB-io/peerdb.git
+cd peerdb
+
+Verify:
+
+ls
+
+You should see files such as:
+
+docker-compose.yml
+flow/
+nexus/
+peerdb-ui/
+...
+Step 2: Check Docker
+docker --version
+docker compose version
+sudo usermod -aG docker $USER
+newgrp docker
+Step 3: Start PeerDB
+
+From the peerdb directory:
+cd ~/peerdb
+docker compose up -d
+Step 4: Verify Containers
+docker ps
+
+---------------------------
+1. Open the UI
+
+Open your browser:
+
+http://<PeerDB_Public_IP>:3000
+
+If you don't know the public IP:
+
+curl ifconfig.me
+
+or check the EC2 console.
+
+2. If the UI doesn't open
+
+Check the PeerDB EC2 Security Group.
+
+Add an inbound rule:
+
+Type	Port	Source
+Custom TCP	3000	Your IP (recommended) or 0.0.0.0/0 temporarily for testing
+
+Then browse again.
+
+What we'll configure in the UI
+
+We'll create two peers.
+
+PostgreSQL Peer
+Field	Value
+Host	172.31.32.28
+Port	5432
+Database	cdc_demo
+User	app_user
+Password	AppUser@123
+
+ClickHouse Peer
+Field	Value
+Host	172.31.36.229
+Port	9000
+Database	cdc_demo
+
+For authentication, tell me:
+
+Are you using the default default ClickHouse user with no password?
+Or have you created a separate ClickHouse user/password?
+
+We'll use the correct credentials based on your setup.
+
+Before creating the mirror
+
+We also need to enable logical replication on PostgreSQL (if you haven't already), because PeerDB relies on PostgreSQL logical replication.
+
+On the PostgreSQL instance, run:
+
+psql -h localhost -U app_user -d cdc_demo
+
+--------------------
+Next Step: Create the Mirror
+
+This is where the actual CDC replication begins.
+
+In the PeerDB UI:
+
+Go to Mirrors
+Click Create Mirror
+Choose:
+Source: PostgreSQL peer
+Destination: ClickHouse peer
+
+You'll then see configuration options for:
+
+Tables to replicate
+Initial snapshot
+Replication mode
+Publication
+Slot
+Batch settings (depending on the PeerDB version)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
